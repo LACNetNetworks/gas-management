@@ -117,3 +117,19 @@ func handleError(messageID json.RawMessage, err error) []byte {
 
 	return data
 }
+
+// GetAllPendingNonceHandler atiende GET /getAllPendingNonce?address=…
+func (c *RelayController) GetAllPendingNonceHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	addr := r.URL.Query().Get("address")
+	if addr == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "falta parámetro address"})
+		return
+	}
+
+	list := c.RelaySignerService.PendingNonces(addr)
+	// 200 OK con el array de int
+	json.NewEncoder(w).Encode(list)
+}

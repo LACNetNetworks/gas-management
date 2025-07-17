@@ -42,8 +42,9 @@ var lock sync.Mutex
 // RelaySignerService is the main service
 type RelaySignerService struct {
 	// The service's configuration
-	Config  *model.Config
-	senders map[string]*big.Int
+	Config *model.Config
+	//senders map[string]*big.Int
+	senders map[string]*BigIntQueue
 }
 
 // Init configuration parameters
@@ -68,8 +69,8 @@ func (service *RelaySignerService) Init(_config *model.Config) error {
 
 	service.Config.Application.Key = string(key[2:66])
 
-	service.senders = make(map[string]*big.Int)
-
+	//service.senders = make(map[string]*big.Int)
+	service.senders = make(map[string]*BigIntQueue)
 	if service.Config.Security.PermissionsEnabled {
 		if !(common.IsHexAddress(service.Config.Security.AccountContractAddress)) {
 			return errors.InvalidAddress.New("Invalid Account Smart Contract Address", -32608)
@@ -85,7 +86,9 @@ func (service *RelaySignerService) Init(_config *model.Config) error {
 }
 
 // SendMetatransaction to blockchain
-func (service *RelaySignerService) SendMetatransaction(id json.RawMessage, to *common.Address, gasLimit uint64, signingData []byte, v uint8, r, s [32]byte, sender string, nonce uint64) *rpc.JsonrpcMessage {
+func (service *RelaySignerService) SendMetatransaction(id json.RawMessage, to *common.Address, gasLimit uint64, signingData []byte, v uint8, r, s [32]byte, _sender string, nonce uint64) *rpc.JsonrpcMessage {
+	sender := normalize(_sender)
+	var nonceLatest *big.Int
 	client := new(bl.Client)
 	err := client.Connect(service.Config.Application.NodeURL)
 	if err != nil {
@@ -98,23 +101,55 @@ func (service *RelaySignerService) SendMetatransaction(id json.RawMessage, to *c
 		HandleError(id, err)
 	}
 
-	optionsSendTransaction, err := client.ConfigTransaction(privateKey, gasLimit, true)
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		err := errors.New("error casting public key to ECDSA", -32602)
+		HandleError(id, err)
+	}
+
+	nodeAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	address := common.HexToAddress(sender)
+
+	nonceLatest, err = client.GetTransactionCount(*service.Config.Application.RelayHubContractAddress, address, nodeAddress)
+	log.GeneralLogger.Println("nonceLatest", nonceLatest)
 	if err != nil {
 		return HandleError(id, err)
 	}
-	tx, err := client.SendMetatransaction(*service.Config.Application.RelayHubContractAddress, optionsSendTransaction, to, signingData, v, r, s)
-	if err != nil {
-		return HandleError(id, err)
+	if nonceLatest.Cmp(big.NewInt(int64(nonce))) == 0 {
+		optionsSendTransaction, err := client.ConfigTransaction(privateKey, gasLimit, true)
+		if err != nil {
+			return HandleError(id, err)
+		}
+		tx, err := client.SendMetatransaction(*service.Config.Application.RelayHubContractAddress, optionsSendTransaction, to, signingData, v, r, s)
+		if err != nil {
+			return HandleError(id, err)
+		}
+
+		log.GeneralLogger.Println("transaction", tx)
+		// Sacar el primero
+		if service.senders[sender] != nil {
+			first := service.senders[sender].Dequeue()
+
+			log.GeneralLogger.Println("nonce remove:", first)
+		}
+		//service.incrementTransactionCount(sender, nonce)
+
+		result := new(rpc.JsonrpcMessage)
+
+		result.ID = id
+		return result.Response(tx)
+	} else {
+
+		// Respondemos con un error JSON-RPC “BAD NONCE”
+		result := new(rpc.JsonrpcMessage)
+		result.ID = id
+		// Aquí usamos ErrorResponse, y construimos un error con el mensaje que deseamos
+		return result.ErrorResponse(errors.New("BAD NONCE", -32000))
+
 	}
 
-	log.GeneralLogger.Println("transaction", tx)
-
-	service.incrementTransactionCount(sender, nonce)
-
-	result := new(rpc.JsonrpcMessage)
-
-	result.ID = id
-	return result.Response(tx)
 }
 
 // GetTransactionReceipt from blockchain
@@ -194,44 +229,61 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 }
 
 // GetTransactionCount of account
-func (service *RelaySignerService) GetTransactionCount(id json.RawMessage, from string, isPending bool) *rpc.JsonrpcMessage {
-	var count *big.Int
-	if isPending && (service.senders[from] != nil) {
-		count = service.senders[from]
-	} else {
-		client := new(bl.Client)
-		err := client.Connect(service.Config.Application.NodeURL)
-		if err != nil {
-			HandleError(id, err)
+func (service *RelaySignerService) GetTransactionCount(id json.RawMessage, _from string, isPending bool) *rpc.JsonrpcMessage {
+	log.GeneralLogger.Println("GetTransactionCount")
+	var nonce *big.Int
+	client := new(bl.Client)
+	from := normalize(_from)
+	err := client.Connect(service.Config.Application.NodeURL)
+	if err != nil {
+		HandleError(id, err)
+	}
+	defer client.Close()
+
+	privateKey, err := crypto.HexToECDSA(service.Config.Application.Key)
+	if err != nil {
+		HandleError(id, err)
+	}
+
+	publicKey := privateKey.Public()
+	publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
+	if !ok {
+		err := errors.New("error casting public key to ECDSA", -32602)
+		HandleError(id, err)
+	}
+
+	nodeAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
+
+	address := common.HexToAddress(from)
+
+	nonce, err = client.GetTransactionCount(*service.Config.Application.RelayHubContractAddress, address, nodeAddress)
+
+	if err != nil {
+		HandleError(id, err)
+	}
+	//si obtenemos nonce pending
+	if isPending {
+		if service.senders[from] == nil {
+			//fmt.Println("no existe  cola para el sender ", from)
+			service.senders[from] = NewQueue()
+		} else {
+			if q := service.senders[from]; len(*q) > 0 {
+				last := (*q)[len(*q)-1]
+				//	fmt.Println("nonces , Último elemento:", last)
+				nonce = new(big.Int).Add(last, big.NewInt(1))
+
+			}
+
 		}
-		defer client.Close()
-
-		privateKey, err := crypto.HexToECDSA(service.Config.Application.Key)
-		if err != nil {
-			HandleError(id, err)
-		}
-
-		publicKey := privateKey.Public()
-		publicKeyECDSA, ok := publicKey.(*ecdsa.PublicKey)
-		if !ok {
-			err := errors.New("error casting public key to ECDSA", -32602)
-			HandleError(id, err)
-		}
-
-		nodeAddress := crypto.PubkeyToAddress(*publicKeyECDSA)
-
-		address := common.HexToAddress(from)
-
-		count, err = client.GetTransactionCount(*service.Config.Application.RelayHubContractAddress, address, nodeAddress)
-		if err != nil {
-			HandleError(id, err)
-		}
+		service.senders[from].Enqueue(nonce)
+		//count = service.senders[from]
+		//log.GeneralLogger.Println("Pending nonce:", nonce, "from:", from)
 	}
 
 	result := new(rpc.JsonrpcMessage)
 
 	result.ID = id
-	return result.Response(fmt.Sprintf("0x%x", count))
+	return result.Response(fmt.Sprintf("0x%x", nonce))
 }
 
 // VerifyGasLimit sent a transaction
@@ -428,14 +480,14 @@ func decrement() {
 	log.GeneralLogger.Println("gas limit was reseted to 0")
 }
 
-func (service *RelaySignerService) incrementTransactionCount(from string, nonce uint64) {
+/*func (service *RelaySignerService) incrementTransactionCount(from string, nonce uint64) {
 	if service.senders[from] != nil {
 		newNonce := service.senders[from].Uint64() + 1
 		service.senders[from].SetUint64(newNonce)
 	} else {
 		service.senders[from] = new(big.Int).SetUint64(nonce)
 	}
-}
+}*/
 
 // HandleError
 func HandleError(id json.RawMessage, err error) *rpc.JsonrpcMessage {
@@ -443,4 +495,19 @@ func HandleError(id json.RawMessage, err error) *rpc.JsonrpcMessage {
 	result := new(rpc.JsonrpcMessage)
 	result.ID = id
 	return result.ErrorResponse(err)
+}
+func normalize(addr string) string {
+	return common.HexToAddress(addr).Hex()
+}
+
+// PendingNonces devuelve todos los nonces actualmente encolados para un remitente.
+func (service *RelaySignerService) PendingNonces(rawSender string) []*big.Int {
+	sender := normalize(rawSender)
+
+	q := service.senders[sender]
+	var list []*big.Int
+	for _, n := range *q {
+		list = append(list, n)
+	}
+	return list
 }

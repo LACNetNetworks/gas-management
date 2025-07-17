@@ -67,5 +67,8 @@ func getConfigFromFile() *model.Config {
 func setupRoutes(port string) {
 	log.GeneralLogger.Println("Init RelaySigner")
 	http.HandleFunc("/", relayController.SignTransaction)
+
+	// Nuevo endpoint REST
+	http.HandleFunc("/getAllPendingNonce", relayController.GetAllPendingNonceHandler)
 	http.ListenAndServe(":"+port, nil)
 }

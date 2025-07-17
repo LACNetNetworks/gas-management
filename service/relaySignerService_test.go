@@ -138,16 +138,28 @@ func TestGetTransactionCountPending(t *testing.T) {
 	var params []string
 	_ = json.Unmarshal(rpcMessage.Params, &params)
 
-	applicationConfig := model.ApplicationConfig{NodeURL: srv.URL + "/getTransactionCount", ContractAddress: "0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E"}
+	applicationConfig := model.ApplicationConfig{NodeURL: srv.URL + "/getTransactionCount", ContractAddress: "0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E", Key: "b3e7374dca5ca90c3899dbb2c978051437fb15534c945bf59df16d6c80be27c0"}
 	config := model.Config{Application: applicationConfig}
 	relaySignerService := new(RelaySignerService)
-	_ = relaySignerService.Init(&config)
-	relaySignerService.senders = make(map[string]*big.Int)
-	relaySignerService.senders["0x92c9885663f6e84127c857d3137936c424b7e07555d2bc7d8bd781b3f0847ac8"] = new(big.Int).SetUint64(200)
+	//_ = relaySignerService.Init(&config)
+	if err := relaySignerService.Init(&config); err != nil {
+		t.Fatal(err)
+	}
+	// pon el RelayHub
+	hub := common.HexToAddress("0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E")
+	relaySignerService.Config.Application.RelayHubContractAddress = &hub
+
+	// 3) Inicializa la cola con la dirección *checksummed*
+	addr := common.HexToAddress(params[0]).Hex()
+
+	relaySignerService.senders = make(map[string]*BigIntQueue)
+	relaySignerService.senders[addr] = &BigIntQueue{new(big.Int).SetUint64(200)}
 	jsonResponse := relaySignerService.GetTransactionCount(rpcMessage.ID, params[0], true)
 
-	if jsonResponse.String() != `{"jsonrpc":"2.0","id":53,"result":"0xc8"}` {
-		t.Errorf("Incorrect nonce was gotten")
+	//jsonResponse := relaySignerService.GetTransactionCount(rpcMessage.ID, params[0], true)
+	want := `{"jsonrpc":"2.0","id":53,"result":"0xc8"}`
+	if jsonResponse.String() != want {
+		t.Errorf("Incorrect nonce: got %s, want %s", jsonResponse.String(), want)
 	}
 }
 
@@ -170,7 +182,7 @@ func TestGetTransactionCountPendingNoValue(t *testing.T) {
 	relayHubAddress := common.HexToAddress("0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E")
 	relaySignerService.Config.Application.RelayHubContractAddress = &relayHubAddress
 	relaySignerService.Config.Application.ContractAddress = "0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E"
-	relaySignerService.senders = make(map[string]*big.Int)
+	relaySignerService.senders = make(map[string]*BigIntQueue)
 	jsonResponse := relaySignerService.GetTransactionCount(rpcMessage.ID, params[0], true)
 
 	if jsonResponse.String() != `{"jsonrpc":"2.0","id":53,"result":"0x159"}` {
