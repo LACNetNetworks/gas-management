@@ -504,7 +504,11 @@ func normalize(addr string) string {
 func (service *RelaySignerService) PendingNonces(rawSender string) []*big.Int {
 	sender := normalize(rawSender)
 
-	q := service.senders[sender]
+	q, exists := service.senders[sender]
+	if !exists || q == nil {
+		return []*big.Int{}
+	}
+
 	var list []*big.Int
 	for _, n := range *q {
 		list = append(list, n)
