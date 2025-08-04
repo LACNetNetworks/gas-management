@@ -359,6 +359,168 @@ func TestNonceAfterTransactions(t *testing.T) {
 	}
 }
 
+func TestNonceCollisionSendMetatransactionSameSender(t *testing.T) {
+    
+	const workers = 3
+    
+    // 1) Stand up your same serverMock
+    srv := serverMock()
+    defer srv.Close()
+
+    // 2) Prepare the service exactly as in TestSendMetatransaction
+    dir, _ := os.Getwd()
+    createKeyMock(dir + "/keyMock")
+    setKeyMock()
+
+    cfg := &model.Config{
+        Application: model.ApplicationConfig{
+            NodeURL:         srv.URL + "/getRelayHubContract",
+            ContractAddress: "0x0ae2Da68515Ef8DC4bBCa1fA1bcE00C508b2Af4B",
+            NodeKeyPath:     dir + "/keyMock",
+        },
+    }
+
+	contents := []byte(`{"id":2914410858336929,"jsonrpc":"2.0","params":["0xf8840180831e8480946e6bbf31aa45042d53128339383fcd1c377b42c780a46057361d00000000000000000000000000000000000000000000000000000000000001591ba028934b543809922b277e85f6bcf7b1f25e937de05c5138e17fdfa480ba74e84ba055a2a611763ffcb748547408093551928c9549f95a0a9cabd3b1f1f2e166cc16"],"method":"eth_sendRawTransaction"}`)
+
+	var rpcMessage rpc.JsonrpcMessage
+	_ = json.Unmarshal(contents, &rpcMessage)
+
+	var params []string
+	_ = json.Unmarshal(rpcMessage.Params, &params)
+
+    svc := new(RelaySignerService)
+    if err := svc.Init(cfg); err != nil {
+        t.Fatalf("Init failed: %v", err)
+    }
+    // ensure we hit the mock endpoint
+    svc.Config.Application.NodeURL = srv.URL + "/sendMetatransaction"
+
+    // 3) Seed the map so every call goes through incrementTransactionCount
+    //svc.senders = map[string]*big.Int{senderAddr: big.NewInt(0)}
+	svc.senders = make(map[string]*big.Int)
+    // 4) Spawn N workers (goroutines) all calling SendMetatransaction
+    to := common.HexToAddress("0x82a978b3f5962a5b0957d9ee9eef472ee55b42f1")
+    data, _ := hex.DecodeString("0xf861808082ea6094fd32cfc2e71611626d6368a41f915d0077a306a180b8446057361d000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000173cf75f0905338597fcd38f5ce13e6840b230e9")         // empty payload is fine
+	var gasLimit uint64
+	var nonce uint64
+	var r [32]byte
+	var s [32]byte
+
+	gasLimit = 200000
+	nonce=1
+	senderAddr:="0x0000000000000000000000000000000000000000"
+
+    var wg sync.WaitGroup
+    wg.Add(workers)
+    for i := 0; i < workers; i++ {
+        go func() {
+            defer wg.Done()
+			svc.SendMetatransaction(rpcMessage.ID, &to, gasLimit, data, 27, r, s, senderAddr, nonce)
+        }()
+    }
+    wg.Wait()
+
+	err := os.Remove("keyMock")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+    //Check COLLISION: only one key should exist
+    if got := len(svc.senders); got != 1 {
+        t.Fatalf("expected 1 entry on collision, got %d", got)
+    }
+
+    // And if you increment per call(worker), it should be 3, sender = nonce(3)
+    if cnt := svc.senders[senderAddr].Uint64(); cnt != uint64(workers) {
+        t.Errorf("expected count=%d, got %d", workers, cnt)
+    }	
+}
+
+func TestNonceRaceSendMetatransactionDifferentSenders(t *testing.T) {
+    
+	const workers = 3
+    
+    // 1) Stand up your same serverMock
+    srv := serverMock()
+    defer srv.Close()
+
+    // 2) Prepare the service exactly as in TestSendMetatransaction
+    dir, _ := os.Getwd()
+    createKeyMock(dir + "/keyMock")
+    setKeyMock()
+
+    cfg := &model.Config{
+        Application: model.ApplicationConfig{
+            NodeURL:         srv.URL + "/getRelayHubContract",
+            ContractAddress: "0x0ae2Da68515Ef8DC4bBCa1fA1bcE00C508b2Af4B",
+            NodeKeyPath:     dir + "/keyMock",
+        },
+    }
+
+	contents := []byte(`{"id":2914410858336929,"jsonrpc":"2.0","params":["0xf8840180831e8480946e6bbf31aa45042d53128339383fcd1c377b42c780a46057361d00000000000000000000000000000000000000000000000000000000000001591ba028934b543809922b277e85f6bcf7b1f25e937de05c5138e17fdfa480ba74e84ba055a2a611763ffcb748547408093551928c9549f95a0a9cabd3b1f1f2e166cc16"],"method":"eth_sendRawTransaction"}`)
+
+	var rpcMessage rpc.JsonrpcMessage
+	_ = json.Unmarshal(contents, &rpcMessage)
+
+	var params []string
+	_ = json.Unmarshal(rpcMessage.Params, &params)
+
+    svc := new(RelaySignerService)
+    if err := svc.Init(cfg); err != nil {
+        t.Fatalf("Init failed: %v", err)
+    }
+    // ensure we hit the mock endpoint
+    svc.Config.Application.NodeURL = srv.URL + "/sendMetatransaction"
+
+    // 3) Seed the map so every call goes through incrementTransactionCount
+    //svc.senders = map[string]*big.Int{senderAddr: big.NewInt(0)}
+	svc.senders = make(map[string]*big.Int)
+    // 4) Spawn N workers (goroutines) all calling SendMetatransaction
+    to := common.HexToAddress("0x82a978b3f5962a5b0957d9ee9eef472ee55b42f1")
+    data, _ := hex.DecodeString("0xf861808082ea6094fd32cfc2e71611626d6368a41f915d0077a306a180b8446057361d000000000000000000000000000000000000000000000000000000000000003c000000000000000000000000173cf75f0905338597fcd38f5ce13e6840b230e9")         // empty payload is fine
+	var gasLimit uint64
+	var nonce uint64
+	var r [32]byte
+	var s [32]byte
+
+	gasLimit = 200000
+	nonce=1
+
+    var wg sync.WaitGroup
+    wg.Add(workers)
+    for i := 0; i < workers; i++ {
+        go func(i int) {
+            defer wg.Done()
+			senderAddr := fmt.Sprintf("0x%040x", i)
+			svc.SendMetatransaction(rpcMessage.ID, &to, gasLimit, data, 27, r, s, senderAddr, nonce)
+			//fmt.Println("=Sender=")
+			//fmt.Println(senderAddr)
+			//fmt.Println("=Nonce=")
+			//fmt.Println(i)
+        }(i)
+    }
+    wg.Wait()
+
+	err := os.Remove("keyMock")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+    // 5) Check how many entries we actually got back
+	 // RACE: each goroutine gets its own key
+	 if got, want := len(svc.senders), workers; got != want {
+        t.Fatalf("expected %d distinct entries, got %d", want, got)
+    }
+
+    // And each one saw exactly nonce==1
+    for i := 0; i < workers; i++ {
+        sender := fmt.Sprintf("0x%040x", i)
+        if cnt := svc.senders[sender].Uint64(); cnt != 1 {
+            t.Errorf("for %s: expected count=1, got %d", sender, cnt)
+        }
+    }
+}
+
 func serverMock() *httptest.Server {
 	handler := http.NewServeMux()
 	handler.HandleFunc("/getTransactionCount", mockGetNonce)
