@@ -48,6 +48,25 @@ $ ./gas-relay-signer
 * [Comparison with Ethereum](https://github.com/LACNetNetworks/gas-management/blob/master/docs/COMPARISON_WITH_ETHEREUM.md)
 * [FAQ](https://github.com/LACNet-Networks/gas-management/blob/master/docs/FAQ.md)
 
+
+## Concurrency nonce tests
+
+There are two specific unit tests for handle with nonce concurrecy into relaySignerService_test.go:
+
+TestNonceRaceSendMetatransactionDifferentSenders(t *testing.T)
+TestNonceCollisionSendMetatransactionSameSender(t *testing.T)
+
+Run this command for check the tests:
+
+```
+go test ./service -v -run ^TestNonceRace
+go test ./service -race -v -run ^TestNonceRace
+
+go test ./service -v -run ^TestNonceCollision
+go test ./service -race -v -run ^TestNonceCollision
+
+```
+
 ## Copyright 2022 LACNet
 
 Licensed under the Apache License, Version 2.0 (the "License");
