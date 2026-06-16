@@ -10,7 +10,6 @@ import (
 	log "github.com/LACNetNetworks/gas-relay-signer/audit"
 	relay "github.com/LACNetNetworks/gas-relay-signer/blockchain/contracts"
 	"github.com/LACNetNetworks/gas-relay-signer/errors"
-	"github.com/LACNetNetworks/gas-relay-signer/model"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -121,17 +120,6 @@ func (ec *Client) SendMetatransaction(contractAddress common.Address, options *b
 	transactionHash := tx.Hash()
 
 	return &transactionHash, nil
-}
-
-func createCallMsgFromTransaction(from common.Address, tx *types.Transaction) model.CallRequest {
-	log.GeneralLogger.Printf("Call=[From:%s,To:%s,Data:%s,gasLimit:%s", from.Hex(), tx.To().Hex(), hexutil.Encode(tx.Data()), hexutil.EncodeUint64(tx.Gas()))
-
-	return model.CallRequest{
-		From: from.Hex(),
-		To:   tx.To().Hex(),
-		Gas:  hexutil.EncodeUint64(tx.Gas()),
-		Data: hexutil.Encode(tx.Data()),
-	}
 }
 
 func (ec *Client) GenerateTransaction(options *bind.TransactOpts, to *common.Address, relayAddress common.Address, signingData []byte, v uint8, r, s [32]byte) (*types.Transaction, error) {

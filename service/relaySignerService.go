@@ -89,7 +89,7 @@ func (service *RelaySignerService) SendMetatransaction(id json.RawMessage, to *c
 	client := new(bl.Client)
 	err := client.Connect(service.Config.Application.NodeURL)
 	if err != nil {
-		HandleError(id, err)
+		return HandleError(id, err)
 	}
 	defer client.Close()
 
@@ -122,7 +122,7 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 	client := new(bl.Client)
 	err := client.Connect(service.Config.Application.NodeURL)
 	if err != nil {
-		HandleError(id, err)
+		return HandleError(id, err)
 	}
 	defer client.Close()
 
@@ -202,7 +202,7 @@ func (service *RelaySignerService) GetTransactionCount(id json.RawMessage, from 
 		client := new(bl.Client)
 		err := client.Connect(service.Config.Application.NodeURL)
 		if err != nil {
-			HandleError(id, err)
+			return HandleError(id, err)
 		}
 		defer client.Close()
 
@@ -299,6 +299,7 @@ func (service *RelaySignerService) DecreaseGasUsed(id json.RawMessage) bool {
 	err := client.Connect(service.Config.Application.NodeURL)
 	if err != nil {
 		HandleError(id, err)
+		return false
 	}
 	defer client.Close()
 
@@ -341,46 +342,6 @@ func transactionRelayedFailed(id json.RawMessage, data []byte) (bool, []byte) {
 	}
 
 	return transactionRelayedEvent.Executed, transactionRelayedEvent.Output
-}
-
-func getBadTransaction(id json.RawMessage, data []byte) []byte {
-	var badTransactionEvent struct {
-		Node           common.Address
-		OriginalSender common.Address
-		ErrorCode      uint8
-	}
-
-	relayHubAbi, err := abi.JSON(strings.NewReader(RelayABI))
-	if err != nil {
-		HandleError(id, err)
-	}
-
-	err = relayHubAbi.Unpack(&badTransactionEvent, "BadTransactionSent", data)
-
-	if err != nil {
-		HandleError(id, err)
-	}
-
-	switch badTransactionEvent.ErrorCode {
-	case 0:
-		return []byte("Max block gas limit overpassed")
-	case 1:
-		return []byte("Original sender is different who signed the transaction")
-	case 2:
-		return []byte("Bad nonce assigned")
-	case 3:
-		return []byte("Not enough gas to process the transaction")
-	case 4:
-		return []byte("Destination is an empty contract")
-	case 5:
-		return []byte("Your bytecode to deploy is empty")
-	case 6:
-		return []byte("Invalid Signature")
-	case 7:
-		return []byte("Destination is not allowed")
-	}
-
-	return nil
 }
 
 func (service *RelaySignerService) ProcessNewBlocks(done <-chan interface{}) {

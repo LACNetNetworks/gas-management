@@ -107,6 +107,16 @@ func processRawTransaction(relaySignerService *service.RelaySignerService, rpcMe
 		return
 	}
 
+	// El RelayHub espera una firma pre-EIP155 (chainId=0 => v=27/28). Si el cliente
+	// firmó con EIP-155, el valor se truncaría (gosec G115) y la meta-tx revertiría
+	// on-chain. Lo rechazamos temprano con un mensaje claro.
+	if vUint := v.Uint64(); vUint != 27 && vUint != 28 {
+		err := errors.New("transaction must be signed pre-EIP155 (chainId=0, v=27 or 28)")
+		data := handleError(rpcMessage.ID, err)
+		w.Write(data)
+		return
+	}
+
 	message, err := decodeTransaction.AsMessage(types.NewEIP155Signer(decodeTransaction.ChainId()))
 	if err != nil {
 		data := handleError(rpcMessage.ID, err)

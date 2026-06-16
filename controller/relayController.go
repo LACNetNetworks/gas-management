@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -37,12 +37,12 @@ func (controller *RelayController) SignTransaction(w http.ResponseWriter, r *htt
 
 	//log.GeneralLogger.Println("Body:", r.Body)
 
-	buf, err := ioutil.ReadAll(r.Body)
+	buf, err := io.ReadAll(r.Body)
 	if err != nil {
 		handleError(nil, err)
 	}
-	rdr1 := ioutil.NopCloser(bytes.NewBuffer(buf))
-	rdr2 := ioutil.NopCloser(bytes.NewBuffer(buf))
+	rdr1 := io.NopCloser(bytes.NewBuffer(buf))
+	rdr2 := io.NopCloser(bytes.NewBuffer(buf))
 
 	//	log.GeneralLogger.Println("Request body : ", rdr1)
 

@@ -17,6 +17,7 @@ package main
 import (
 	"net/http"
 	"os"
+	"time"
 
 	log "github.com/LACNetNetworks/gas-relay-signer/audit"
 	"github.com/LACNetNetworks/gas-relay-signer/controller"
@@ -66,6 +67,18 @@ func getConfigFromFile() *model.Config {
 
 func setupRoutes(port string) {
 	log.GeneralLogger.Println("Init RelaySigner")
-	http.HandleFunc("/", relayController.SignTransaction)
-	http.ListenAndServe(":"+port, nil)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", relayController.SignTransaction)
+	// http.Server con timeouts explícitos (evita Slowloris/DoS — gosec G114).
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      120 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if err := server.ListenAndServe(); err != nil {
+		log.GeneralLogger.Fatal(err)
+	}
 }
