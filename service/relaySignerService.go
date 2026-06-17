@@ -17,6 +17,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	log "github.com/LACNetNetworks/gas-relay-signer/audit"
 	bl "github.com/LACNetNetworks/gas-relay-signer/blockchain"
@@ -344,34 +345,103 @@ func transactionRelayedFailed(id json.RawMessage, data []byte) (bool, []byte) {
 	return transactionRelayedEvent.Executed, transactionRelayedEvent.Output
 }
 
+// ProcessNewBlocks se suscribe por WebSocket a las nuevas cabeceras y, ante caídas del nodo o del
+// socket, RECONECTA con backoff exponencial en vez de terminar el proceso. Solo sale por `done`.
 func (service *RelaySignerService) ProcessNewBlocks(done <-chan interface{}) {
 	fmt.Println("Initiating process BLOCKSSS")
-	client := new(bl.Client)
-	err := client.Connect(service.Config.Application.WSURL)
-	if err != nil {
-		log.GeneralLogger.Fatal(err)
-	}
-	defer client.Close()
 
-	headers := make(chan *types.Header)
-	sub, err := client.GetEthclient().SubscribeNewHead(context.Background(), headers)
-	if err != nil {
-		log.GeneralLogger.Fatal(err)
-	}
+	const (
+		initialBackoff = 1 * time.Second
+		maxBackoff     = 30 * time.Second
+	)
+	backoff := initialBackoff
 
-	for {
-		select {
-		case err := <-sub.Err():
-			log.GeneralLogger.Println("WebSocket Failed")
-			log.GeneralLogger.Fatal(err)
-		case header := <-headers:
-			log.GeneralLogger.Println("new block generated:", header.Hash().Hex())
-			decrement()
-		case <-done:
-			log.GeneralLogger.Println("quit signal received...exiting from processing blocks")
+	for { // bucle externo: (re)conexión
+		if isDone(done) {
 			return
 		}
+
+		client := new(bl.Client)
+		if err := client.Connect(service.Config.Application.WSURL); err != nil {
+			log.GeneralLogger.Println("WS connect failed, retrying in", backoff, ":", err)
+			if waitOrDone(done, backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff, maxBackoff)
+			continue
+		}
+
+		headers := make(chan *types.Header)
+		sub, err := client.GetEthclient().SubscribeNewHead(context.Background(), headers)
+		if err != nil {
+			log.GeneralLogger.Println("WS subscribe failed, retrying in", backoff, ":", err)
+			client.Close()
+			if waitOrDone(done, backoff) {
+				return
+			}
+			backoff = nextBackoff(backoff, maxBackoff)
+			continue
+		}
+
+		log.GeneralLogger.Println("subscribed to new heads (WS connected)")
+		backoff = initialBackoff // reset tras una suscripción exitosa
+		// Nota: la ventana de gas (GAS_LIMIT) se resincroniza sola con el próximo bloque (decrement()).
+
+		reconnect := false
+		for !reconnect { // bucle interno: procesar cabeceras hasta que el socket falle
+			select {
+			case err := <-sub.Err():
+				log.GeneralLogger.Println("WebSocket failed, will reconnect:", err)
+				reconnect = true
+			case header := <-headers:
+				log.GeneralLogger.Println("new block generated:", header.Hash().Hex())
+				decrement()
+			case <-done:
+				log.GeneralLogger.Println("quit signal received...exiting from processing blocks")
+				sub.Unsubscribe()
+				client.Close()
+				return
+			}
+		}
+
+		sub.Unsubscribe()
+		client.Close()
+		if waitOrDone(done, backoff) {
+			return
+		}
+		backoff = nextBackoff(backoff, maxBackoff)
 	}
+}
+
+// isDone indica si ya se recibió la señal de apagado.
+func isDone(done <-chan interface{}) bool {
+	select {
+	case <-done:
+		return true
+	default:
+		return false
+	}
+}
+
+// waitOrDone duerme d, o retorna true si llega la señal de apagado durante la espera.
+func waitOrDone(done <-chan interface{}, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// nextBackoff duplica el backoff hasta un tope.
+func nextBackoff(current, max time.Duration) time.Duration {
+	next := current * 2
+	if next > max {
+		next = max
+	}
+	return next
 }
 
 func increment(gasLimit uint64) uint64 {
