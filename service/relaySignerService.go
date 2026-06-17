@@ -147,7 +147,7 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 		eventTransactionRelayed := hex.EncodeToString(e.Sum(nil))
 
 		f.Write([]byte("BadTransactionSent(address,address,uint8)"))
-		//eventBadTransaction := hex.EncodeToString(f.Sum(nil))
+		eventBadTransaction := hex.EncodeToString(f.Sum(nil))
 
 		fmt.Println("deployed contract eventKeccak:", eventContractDeployed)
 		fmt.Println("transaction relayed eventKeccak:", eventTransactionRelayed)
@@ -171,17 +171,19 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 					receiptReverted["revertReason"] = hexutil.Encode(output)
 				}
 			}
-			/*		if log.Topics[0].Hex() == "0x"+eventBadTransaction {
-					receipt.Status = uint64(0)
-					jsonReceipt, err := json.Marshal(receipt)
-					if err != nil {
-						HandleError(id, err)
-					}
+			if log.Topics[0].Hex() == "0x"+eventBadTransaction {
+				errorCode := badTransactionErrorCode(id, log.Data)
+				receipt.Status = uint64(0)
+				fmt.Println("BadTransactionSent errorCode:", errorCodeName(errorCode))
 
-					json.Unmarshal(jsonReceipt, &receiptReverted)
-					output := getBadTransaction(id, log.Data)
-					receiptReverted["revertReason"] = hexutil.Encode(output)
-				}*/
+				jsonReceipt, err := json.Marshal(receipt)
+				if err != nil {
+					HandleError(id, err)
+				}
+
+				json.Unmarshal(jsonReceipt, &receiptReverted)
+				receiptReverted["revertReason"] = "BadTransactionSent: " + errorCodeName(errorCode)
+			}
 		}
 	}
 	result := new(rpc.JsonrpcMessage)
@@ -343,6 +345,39 @@ func transactionRelayedFailed(id json.RawMessage, data []byte) (bool, []byte) {
 	}
 
 	return transactionRelayedEvent.Executed, transactionRelayedEvent.Output
+}
+
+// badTransactionErrorCode decodifica el evento BadTransactionSent y devuelve su ErrorCode.
+func badTransactionErrorCode(id json.RawMessage, data []byte) uint8 {
+	var badTransactionEvent struct {
+		Node           common.Address
+		OriginalSender common.Address
+		ErrorCode      uint8
+	}
+
+	relayHubAbi, err := abi.JSON(strings.NewReader(RelayABI))
+	if err != nil {
+		HandleError(id, err)
+	}
+
+	err = relayHubAbi.Unpack(&badTransactionEvent, "BadTransactionSent", data)
+	if err != nil {
+		HandleError(id, err)
+	}
+
+	return badTransactionEvent.ErrorCode
+}
+
+// errorCodeName traduce el enum ErrorCode de IRelayHub a un nombre legible.
+func errorCodeName(code uint8) string {
+	names := []string{
+		"MaxBlockGasLimit", "BadOriginalSender", "BadNonce", "NotEnoughGas",
+		"IsNotContract", "EmptyCode", "InvalidSignature", "InvalidDestination", "OK",
+	}
+	if int(code) < len(names) {
+		return names[code]
+	}
+	return fmt.Sprintf("Unknown(%d)", code)
 }
 
 // ProcessNewBlocks se suscribe por WebSocket a las nuevas cabeceras y, ante caídas del nodo o del
