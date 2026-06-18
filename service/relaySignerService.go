@@ -160,7 +160,8 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 				executed, output := transactionRelayedFailed(id, log.Data)
 				if !executed {
 					receipt.Status = uint64(0)
-					fmt.Println("Reverse Error:", hexutil.Encode(output))
+					reason := decodeRevertReason(output)
+					fmt.Println("Reverse Error:", reason)
 
 					jsonReceipt, err := json.Marshal(receipt)
 					if err != nil {
@@ -168,7 +169,7 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 					}
 
 					json.Unmarshal(jsonReceipt, &receiptReverted)
-					receiptReverted["revertReason"] = hexutil.Encode(output)
+					receiptReverted["revertReason"] = reason
 				}
 			}
 			if log.Topics[0].Hex() == "0x"+eventBadTransaction {
@@ -366,6 +367,36 @@ func badTransactionErrorCode(id json.RawMessage, data []byte) uint8 {
 	}
 
 	return badTransactionEvent.ErrorCode
+}
+
+// decodeRevertReason traduce el `output` de un revert a un string legible.
+// Soporta Error(string) y Panic(uint256); para custom errors devuelve el selector + hex.
+func decodeRevertReason(output []byte) string {
+	if len(output) == 0 {
+		return "execution reverted (sin motivo)"
+	}
+	if len(output) < 4 {
+		return "execution reverted: " + hexutil.Encode(output)
+	}
+
+	selector := hexutil.Encode(output[:4])
+	switch selector {
+	case "0x08c379a0": // Error(string)
+		// layout: [4:36]=offset, [36:68]=length, [68:68+length]=string
+		if len(output) >= 68 {
+			length := new(big.Int).SetBytes(output[36:68]).Uint64()
+			if uint64(len(output)) >= 68+length {
+				return "execution reverted: " + string(output[68:68+length])
+			}
+		}
+	case "0x4e487b71": // Panic(uint256)
+		if len(output) >= 36 {
+			code := new(big.Int).SetBytes(output[4:36])
+			return fmt.Sprintf("execution reverted: panic(0x%x)", code)
+		}
+	}
+	// Custom error (p. ej. OZ v5): no se puede decodificar sin su ABI; se muestra el selector.
+	return "execution reverted (custom error " + selector + "): " + hexutil.Encode(output)
 }
 
 // errorCodeName traduce el enum ErrorCode de IRelayHub a un nombre legible.
