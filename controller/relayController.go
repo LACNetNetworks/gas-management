@@ -79,6 +79,9 @@ func (controller *RelayController) SignTransaction(w http.ResponseWriter, r *htt
 	} else if rpcMessage.IsGetTransactionCount() {
 		processTransactionCount(controller.RelaySignerService, rpcMessage, w)
 		return
+	} else if rpcMessage.IsGetMetaTxResult() {
+		processGetMetaTxResult(controller.RelaySignerService, rpcMessage, w)
+		return
 	} else {
 		//	r.Body=rdr2
 		err := errors.New("method is not supported")

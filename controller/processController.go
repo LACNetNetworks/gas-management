@@ -82,6 +82,26 @@ func processTransactionCount(relaySignerService *service.RelaySignerService, rpc
 	w.Write(data)
 }
 
+func processGetMetaTxResult(relaySignerService *service.RelaySignerService, rpcMessage rpc.JsonrpcMessage, w http.ResponseWriter) {
+	log.GeneralLogger.Println("Is getMetaTxResult")
+	var params []string
+	err := json.Unmarshal(rpcMessage.Params, &params)
+	if err != nil || len(params) == 0 {
+		data := handleError(rpcMessage.ID, errors.New("invalid params: expected [txHash]"))
+		w.Write(data)
+		return
+	}
+	response := relaySignerService.GetMetaTxResult(rpcMessage.ID, params[0][2:])
+	data, err := json.Marshal(response)
+	if err != nil {
+		log.GeneralLogger.Println(err)
+		data := handleError(rpcMessage.ID, errors.New("internal error"))
+		w.Write(data)
+		return
+	}
+	w.Write(data)
+}
+
 func processRawTransaction(relaySignerService *service.RelaySignerService, rpcMessage rpc.JsonrpcMessage, w http.ResponseWriter) {
 	log.GeneralLogger.Println("Is a rawTransaction")
 	var params []string

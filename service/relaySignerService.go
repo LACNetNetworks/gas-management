@@ -197,6 +197,71 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 
 }
 
+// GetMetaTxResult devuelve el resultado parseado de un meta-tx relayado, a partir de los eventos del
+// RelayHub en el receipt: { mined, success, executed, errorCode, revertReason, deployedAddress }.
+func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transactionID string) *rpc.JsonrpcMessage {
+	client := new(bl.Client)
+	err := client.Connect(service.Config.Application.NodeURL)
+	if err != nil {
+		return HandleError(id, err)
+	}
+	defer client.Close()
+
+	receipt, err := client.GetTransactionReceipt(common.HexToHash(transactionID))
+	if err != nil {
+		return HandleError(id, err)
+	}
+
+	out := map[string]interface{}{
+		"transactionHash": "0x" + transactionID,
+		"mined":           receipt != nil,
+		"success":         true,
+		"executed":        true,
+		"errorCode":       nil,
+		"revertReason":    nil,
+		"deployedAddress": nil,
+	}
+
+	if receipt != nil {
+		d := sha.NewLegacyKeccak256()
+		e := sha.NewLegacyKeccak256()
+		f := sha.NewLegacyKeccak256()
+		d.Write([]byte("ContractDeployed(address,address,address)"))
+		e.Write([]byte("TransactionRelayed(address,address,address,bool,bytes)"))
+		f.Write([]byte("BadTransactionSent(address,address,uint8)"))
+		eventContractDeployed := "0x" + hex.EncodeToString(d.Sum(nil))
+		eventTransactionRelayed := "0x" + hex.EncodeToString(e.Sum(nil))
+		eventBadTransaction := "0x" + hex.EncodeToString(f.Sum(nil))
+
+		for _, lg := range receipt.Logs {
+			if len(lg.Topics) == 0 {
+				continue
+			}
+			switch lg.Topics[0].Hex() {
+			case eventContractDeployed:
+				out["deployedAddress"] = common.BytesToAddress(lg.Data).Hex()
+			case eventTransactionRelayed:
+				executed, output := transactionRelayedFailed(id, lg.Data)
+				out["executed"] = executed
+				if !executed {
+					out["success"] = false
+					out["revertReason"] = decodeRevertReason(output)
+				}
+			case eventBadTransaction:
+				code := badTransactionErrorCode(id, lg.Data)
+				out["success"] = false
+				out["executed"] = false
+				out["errorCode"] = errorCodeName(code)
+				out["revertReason"] = "BadTransactionSent: " + errorCodeName(code)
+			}
+		}
+	}
+
+	result := new(rpc.JsonrpcMessage)
+	result.ID = id
+	return result.Response(out)
+}
+
 // GetTransactionCount of account
 func (service *RelaySignerService) GetTransactionCount(id json.RawMessage, from string, isPending bool) *rpc.JsonrpcMessage {
 	var count *big.Int
@@ -395,8 +460,52 @@ func decodeRevertReason(output []byte) string {
 			return fmt.Sprintf("execution reverted: panic(0x%x)", code)
 		}
 	}
-	// Custom error (p. ej. OZ v5): no se puede decodificar sin su ABI; se muestra el selector.
+	// Custom errors conocidos (OZ v5): se decodifican por catálogo de selectores.
+	if decoded := decodeKnownCustomError(selector, output); decoded != "" {
+		return "execution reverted: " + decoded
+	}
+	// Custom error desconocido: no se puede decodificar sin su ABI; se muestra el selector.
 	return "execution reverted (custom error " + selector + "): " + hexutil.Encode(output)
+}
+
+// knownCustomErrors mapea selectores de errores comunes (OpenZeppelin v5) a su nombre y tipos de args.
+// Tipos soportados para formatear: "address" y "uint256" (cada arg ocupa una palabra de 32 bytes).
+var knownCustomErrors = map[string]struct {
+	name string
+	args []string
+}{
+	"0xe450d38c": {"ERC20InsufficientBalance", []string{"address", "uint256", "uint256"}},
+	"0xfb8f41b2": {"ERC20InsufficientAllowance", []string{"address", "uint256", "uint256"}},
+	"0x96c6fd1e": {"ERC20InvalidSender", []string{"address"}},
+	"0xec442f05": {"ERC20InvalidReceiver", []string{"address"}},
+	"0xe602df05": {"ERC20InvalidApprover", []string{"address"}},
+	"0x94280d62": {"ERC20InvalidSpender", []string{"address"}},
+	"0x118cdaa7": {"OwnableUnauthorizedAccount", []string{"address"}},
+	"0x1e4fbdf7": {"OwnableInvalidOwner", []string{"address"}},
+}
+
+// decodeKnownCustomError formatea un custom error conocido como "Nombre(arg0, arg1, ...)".
+// Devuelve "" si el selector no está catalogado o los datos no alcanzan.
+func decodeKnownCustomError(selector string, output []byte) string {
+	def, ok := knownCustomErrors[selector]
+	if !ok {
+		return ""
+	}
+	args := output[4:]
+	if len(args) < len(def.args)*32 {
+		return ""
+	}
+	parts := make([]string, 0, len(def.args))
+	for i, t := range def.args {
+		word := args[i*32 : (i+1)*32]
+		switch t {
+		case "address":
+			parts = append(parts, common.BytesToAddress(word).Hex())
+		default: // uint256
+			parts = append(parts, new(big.Int).SetBytes(word).String())
+		}
+	}
+	return def.name + "(" + strings.Join(parts, ", ") + ")"
 }
 
 // errorCodeName traduce el enum ErrorCode de IRelayHub a un nombre legible.
