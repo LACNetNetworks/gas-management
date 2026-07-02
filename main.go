@@ -31,6 +31,13 @@ var relaySignerService *service.RelaySignerService
 var relayController *controller.RelayController
 
 func main() {
+	// `gas-relay-signer --version` imprime la versión y sale, ANTES de cargar
+	// config.toml (para que funcione sin fichero de configuración).
+	if isVersionFlag(os.Args[1:]) {
+		printVersion()
+		return
+	}
+
 	config = getConfigFromFile()
 
 	relaySignerService = new(service.RelaySignerService)

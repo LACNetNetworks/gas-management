@@ -27,8 +27,11 @@ solution
 $ git clone https://github.com/lacchain/gas-management
 
 $ cd gas-management
-$ go build
+$ make build      # compila con la versión inyectada desde el tag git (ver "Versión")
 ```
+
+> `go build` a secas también funciona, pero deja la versión en `dev`. Usa `make build`
+> (o los `-ldflags`) para que el binario reporte la versión real.
 
 ## Run
 
@@ -37,6 +40,34 @@ Execute the executable file generated previously in a Validator node
 ```
 $ ./gas-relay-signer
 ```
+
+## Versión
+
+El binario reporta su versión:
+
+```
+$ ./gas-relay-signer --version
+gas-relay-signer v1.1.0 (commit 5b7a3a7, built 2026-07-01T22:48:36Z, go1.23.0)
+```
+
+La versión es el **tag git** (`git describe --tags`), inyectado en compilación vía
+`-ldflags "-X main.version=... -X main.commit=... -X main.date=..."` (lo hace `make build`).
+Compilado en el tag `v1.1.0` reporta `v1.1.0`; en `develop` sin tag, algo como
+`v1.0.1-9-g5b7a3a7`. Sin `ldflags` reporta `dev`.
+
+### Publicar un release (manual)
+
+1. Mergear `develop` → `master` (PR) y situarse en `master` actualizado.
+2. Crear el tag anotado y empujarlo:
+   ```
+   git tag -a v1.1.0 -m "gas-relay-signer v1.1.0"
+   git push origin v1.1.0
+   ```
+3. Compilar el artefacto con la versión inyectada y publicar el release:
+   ```
+   make build VERSION=v1.1.0
+   gh release create v1.1.0 gas-relay-signer --title "v1.1.0" --notes "..."
+   ```
 
 ## Know More
 
@@ -47,6 +78,7 @@ $ ./gas-relay-signer
 * [Stress testing and performance of the network with the GAS distribution mechanism](https://github.com/LACNetNetworks/gas-management/blob/master/docs/STRESS_TESTING.md)
 * [Comparison with Ethereum](https://github.com/LACNetNetworks/gas-management/blob/master/docs/COMPARISON_WITH_ETHEREUM.md)
 * [FAQ](https://github.com/LACNet-Networks/gas-management/blob/master/docs/FAQ.md)
+* [Reporte del fallo de la llamada interna (status=1 → fallida)](docs/RECEIPT-FALLO-INTERNO.md) — cómo el RelaySigner reescribe el receipt a `status=0`+`revertReason` y expone `relay_getMetaTxResult` (rama `develop`).
 
 ## Copyright 2022 LACNet
 
