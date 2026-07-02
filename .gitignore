@@ -12,3 +12,4 @@ lerna-debug.log*
 config.toml
 # Binario compilado (se genera con `make build`)
 gas-relay-signer
+gas-relay-signer-*
