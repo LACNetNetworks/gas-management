@@ -40,11 +40,20 @@ var GAS_LIMIT uint64 = 0
 
 var lock sync.Mutex
 
+// nonceEntry es una entrada del caché de nonces por sender: el PRÓXIMO nonce a usar y cuándo se
+// actualizó. `updatedAt` permite expirar entradas obsoletas (TTL) y volver a leer el nonce real
+// on-chain (getNonce del RelayHub) si el caché quedara desincronizado por cualquier causa.
+type nonceEntry struct {
+	next      uint64
+	updatedAt time.Time
+}
+
 // RelaySignerService is the main service
 type RelaySignerService struct {
 	// The service's configuration
-	Config  *model.Config
-	senders map[string]*big.Int
+	Config      *model.Config
+	senders     map[string]*nonceEntry
+	sendersLock sync.Mutex
 }
 
 // Init configuration parameters
@@ -69,7 +78,7 @@ func (service *RelaySignerService) Init(_config *model.Config) error {
 
 	service.Config.Application.Key = string(key[2:66])
 
-	service.senders = make(map[string]*big.Int)
+	service.senders = make(map[string]*nonceEntry)
 
 	if service.Config.Security.PermissionsEnabled {
 		if !(common.IsHexAddress(service.Config.Security.AccountContractAddress)) {
@@ -179,7 +188,10 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 				}
 			case "0x" + eventBadTransaction:
 				sawBadTransaction = true
-				errorCode := badTransactionErrorCode(id, log.Data)
+				errorCode, badSender := badTransactionErrorCode(id, log.Data)
+				// La meta-tx no consumió nonce en el RelayHub: descartar el contador local del
+				// sender para que su próxima lectura "pending" vuelva al nonce real on-chain.
+				service.invalidateNonce(badSender.Hex())
 				receipt.Status = uint64(0)
 
 				jsonReceipt, err := json.Marshal(receipt)
@@ -279,7 +291,8 @@ func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transacti
 				}
 			case eventBadTransaction:
 				sawBadTransaction = true
-				code := badTransactionErrorCode(id, lg.Data)
+				code, badSender := badTransactionErrorCode(id, lg.Data)
+				service.invalidateNonce(badSender.Hex())
 				out["success"] = false
 				out["executed"] = false
 				out["errorCode"] = errorCodeName(code)
@@ -307,9 +320,12 @@ func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transacti
 // GetTransactionCount of account
 func (service *RelaySignerService) GetTransactionCount(id json.RawMessage, from string, isPending bool) *rpc.JsonrpcMessage {
 	var count *big.Int
-	if isPending && (service.senders[from] != nil) {
-		count = service.senders[from]
-	} else {
+	if isPending {
+		if next, ok := service.cachedNonce(from); ok {
+			count = new(big.Int).SetUint64(next)
+		}
+	}
+	if count == nil {
 		client := new(bl.Client)
 		err := client.Connect(service.Config.Application.NodeURL)
 		if err != nil {
@@ -455,8 +471,9 @@ func transactionRelayedFailed(id json.RawMessage, data []byte) (bool, []byte) {
 	return transactionRelayedEvent.Executed, transactionRelayedEvent.Output
 }
 
-// badTransactionErrorCode decodifica el evento BadTransactionSent y devuelve su ErrorCode.
-func badTransactionErrorCode(id json.RawMessage, data []byte) uint8 {
+// badTransactionErrorCode decodifica el evento BadTransactionSent y devuelve su ErrorCode y el
+// originalSender afectado (para invalidar su entrada en el caché de nonces).
+func badTransactionErrorCode(id json.RawMessage, data []byte) (uint8, common.Address) {
 	var badTransactionEvent struct {
 		Node           common.Address
 		OriginalSender common.Address
@@ -473,7 +490,7 @@ func badTransactionErrorCode(id json.RawMessage, data []byte) uint8 {
 		HandleError(id, err)
 	}
 
-	return badTransactionEvent.ErrorCode
+	return badTransactionEvent.ErrorCode, badTransactionEvent.OriginalSender
 }
 
 // decodeRevertReason traduce el `output` de un revert a un string legible.
@@ -676,13 +693,64 @@ func decrement() {
 	log.GeneralLogger.Println("gas limit was reseted to 0")
 }
 
-func (service *RelaySignerService) incrementTransactionCount(from string, nonce uint64) {
-	if service.senders[from] != nil {
-		newNonce := service.senders[from].Uint64() + 1
-		service.senders[from].SetUint64(newNonce)
-	} else {
-		service.senders[from] = new(big.Int).SetUint64(nonce)
+// senderKey normaliza la clave del caché de nonces. La misma address llega en distinto case según
+// el camino: `eth_getTransactionCount` trae la string cruda del cliente (ethers la manda lowercase)
+// y la escritura interna usa `message.From().Hex()` (checksum EIP-55); sin normalizar se crean
+// entradas duplicadas que leen/escriben estados distintos.
+func senderKey(from string) string {
+	return strings.ToLower(from)
+}
+
+// nonceCacheTTL es la vida máxima de una entrada del caché (config `nonceCacheTTL` en segundos,
+// default 300). Pasado el TTL la entrada se descarta y se vuelve al nonce real on-chain: es la red
+// de seguridad si el caché diverge y el cliente nunca consulta el receipt de la tx fallida.
+func (service *RelaySignerService) nonceCacheTTL() time.Duration {
+	if service.Config != nil && service.Config.Application.NonceCacheTTL > 0 {
+		return time.Duration(service.Config.Application.NonceCacheTTL) * time.Second
 	}
+	return 300 * time.Second
+}
+
+// cachedNonce devuelve el próximo nonce cacheado para `from`, si existe y no expiró.
+func (service *RelaySignerService) cachedNonce(from string) (uint64, bool) {
+	service.sendersLock.Lock()
+	defer service.sendersLock.Unlock()
+	key := senderKey(from)
+	entry := service.senders[key]
+	if entry == nil {
+		return 0, false
+	}
+	if time.Since(entry.updatedAt) > service.nonceCacheTTL() {
+		delete(service.senders, key)
+		return 0, false
+	}
+	return entry.next, true
+}
+
+// invalidateNonce borra la entrada cacheada de `from`: la próxima lectura "pending" releerá el
+// nonce real on-chain. Se llama al detectar BadTransactionSent en el receipt — esa tx NO consumió
+// nonce en el RelayHub, así que el contador local quedó por delante del real y no puede corregirse
+// solo (cada reintento lo alejaría +1 más, dejando la address bloqueada hasta reiniciar el servicio).
+func (service *RelaySignerService) invalidateNonce(from string) {
+	service.sendersLock.Lock()
+	defer service.sendersLock.Unlock()
+	delete(service.senders, senderKey(from))
+	log.GeneralLogger.Println("nonce cache invalidated for sender:", from)
+}
+
+// incrementTransactionCount registra que `from` acaba de relayar una tx firmada con `nonce`: el
+// próximo a usar es al menos nonce+1. Si el caché ya iba más adelante (otras tx en vuelo) se
+// conserva; NO se suma +1 a ciegas — dos envíos que firmaron el MISMO nonce (colisión) solo pueden
+// consumir uno on-chain, y el +1 incondicional dejaba el contador por delante del real para siempre.
+func (service *RelaySignerService) incrementTransactionCount(from string, nonce uint64) {
+	service.sendersLock.Lock()
+	defer service.sendersLock.Unlock()
+	key := senderKey(from)
+	next := nonce + 1
+	if entry := service.senders[key]; entry != nil && time.Since(entry.updatedAt) <= service.nonceCacheTTL() && entry.next > next {
+		next = entry.next
+	}
+	service.senders[key] = &nonceEntry{next: next, updatedAt: time.Now()}
 }
 
 // HandleError

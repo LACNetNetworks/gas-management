@@ -11,6 +11,9 @@ type ApplicationConfig struct {
 	NodeAddressPath         string          `mapstructure:"nodeAddressPath"`
 	Key                     string          `mapstructure:"key"`
 	Port                    string          `mapstructure:"port"`
+	// NonceCacheTTL: vida máxima (segundos) de una entrada del caché de nonces por sender.
+	// 0 o ausente = default (300s).
+	NonceCacheTTL int64 `mapstructure:"nonceCacheTTL"`
 }
 
 type KeyStoreConfig struct {
