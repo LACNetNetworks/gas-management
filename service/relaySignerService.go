@@ -138,9 +138,9 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 		d := sha.NewLegacyKeccak256()
 		e := sha.NewLegacyKeccak256()
 		f := sha.NewLegacyKeccak256()
+		g := sha.NewLegacyKeccak256()
 
 		d.Write([]byte("ContractDeployed(address,address,address)"))
-
 		eventContractDeployed := hex.EncodeToString(d.Sum(nil))
 
 		e.Write([]byte("TransactionRelayed(address,address,address,bool,bytes)"))
@@ -149,19 +149,25 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 		f.Write([]byte("BadTransactionSent(address,address,uint8)"))
 		eventBadTransaction := hex.EncodeToString(f.Sum(nil))
 
-		fmt.Println("deployed contract eventKeccak:", eventContractDeployed)
-		fmt.Println("transaction relayed eventKeccak:", eventTransactionRelayed)
+		g.Write([]byte("Relayed(address,address)"))
+		eventRelayed := hex.EncodeToString(g.Sum(nil))
+
+		var sawContractDeployed, sawTransactionRelayed, sawBadTransaction, sawRelayed bool
 
 		for _, log := range receipt.Logs {
-			if log.Topics[0].Hex() == "0x"+eventContractDeployed {
-				receipt.ContractAddress = common.BytesToAddress(log.Data)
+			if len(log.Topics) == 0 {
+				continue
 			}
-			if log.Topics[0].Hex() == "0x"+eventTransactionRelayed {
+			switch log.Topics[0].Hex() {
+			case "0x" + eventContractDeployed:
+				sawContractDeployed = true
+				receipt.ContractAddress = common.BytesToAddress(log.Data)
+			case "0x" + eventTransactionRelayed:
+				sawTransactionRelayed = true
 				executed, output := transactionRelayedFailed(id, log.Data)
 				if !executed {
 					receipt.Status = uint64(0)
 					reason := decodeRevertReason(output)
-					fmt.Println("Reverse Error:", reason)
 
 					jsonReceipt, err := json.Marshal(receipt)
 					if err != nil {
@@ -171,11 +177,10 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 					json.Unmarshal(jsonReceipt, &receiptReverted)
 					receiptReverted["revertReason"] = reason
 				}
-			}
-			if log.Topics[0].Hex() == "0x"+eventBadTransaction {
+			case "0x" + eventBadTransaction:
+				sawBadTransaction = true
 				errorCode := badTransactionErrorCode(id, log.Data)
 				receipt.Status = uint64(0)
-				fmt.Println("BadTransactionSent errorCode:", errorCodeName(errorCode))
 
 				jsonReceipt, err := json.Marshal(receipt)
 				if err != nil {
@@ -184,7 +189,25 @@ func (service *RelaySignerService) GetTransactionReceipt(id json.RawMessage, tra
 
 				json.Unmarshal(jsonReceipt, &receiptReverted)
 				receiptReverted["revertReason"] = "BadTransactionSent: " + errorCodeName(errorCode)
+			case "0x" + eventRelayed:
+				sawRelayed = true
 			}
+		}
+
+		// Fallo silencioso en DEPLOY: la verificación pasó (evento Relayed) pero el CREATE interno
+		// revirtió en el constructor → no hay ContractDeployed, ni TransactionRelayed, ni
+		// BadTransactionSent. El RelayHub retorna OK y la tx externa mina con status=1; lo exponemos
+		// como fallo para que el cliente se entere (no quedaría reflejado de otra forma).
+		if sawRelayed && !sawContractDeployed && !sawTransactionRelayed && !sawBadTransaction {
+			receipt.Status = uint64(0)
+
+			jsonReceipt, err := json.Marshal(receipt)
+			if err != nil {
+				HandleError(id, err)
+			}
+
+			json.Unmarshal(jsonReceipt, &receiptReverted)
+			receiptReverted["revertReason"] = "deploy reverted: contract constructor failed (no code created)"
 		}
 	}
 	result := new(rpc.JsonrpcMessage)
@@ -226,12 +249,17 @@ func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transacti
 		d := sha.NewLegacyKeccak256()
 		e := sha.NewLegacyKeccak256()
 		f := sha.NewLegacyKeccak256()
+		g := sha.NewLegacyKeccak256()
 		d.Write([]byte("ContractDeployed(address,address,address)"))
 		e.Write([]byte("TransactionRelayed(address,address,address,bool,bytes)"))
 		f.Write([]byte("BadTransactionSent(address,address,uint8)"))
+		g.Write([]byte("Relayed(address,address)"))
 		eventContractDeployed := "0x" + hex.EncodeToString(d.Sum(nil))
 		eventTransactionRelayed := "0x" + hex.EncodeToString(e.Sum(nil))
 		eventBadTransaction := "0x" + hex.EncodeToString(f.Sum(nil))
+		eventRelayed := "0x" + hex.EncodeToString(g.Sum(nil))
+
+		var sawContractDeployed, sawTransactionRelayed, sawBadTransaction, sawRelayed bool
 
 		for _, lg := range receipt.Logs {
 			if len(lg.Topics) == 0 {
@@ -239,8 +267,10 @@ func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transacti
 			}
 			switch lg.Topics[0].Hex() {
 			case eventContractDeployed:
+				sawContractDeployed = true
 				out["deployedAddress"] = common.BytesToAddress(lg.Data).Hex()
 			case eventTransactionRelayed:
+				sawTransactionRelayed = true
 				executed, output := transactionRelayedFailed(id, lg.Data)
 				out["executed"] = executed
 				if !executed {
@@ -248,12 +278,24 @@ func (service *RelaySignerService) GetMetaTxResult(id json.RawMessage, transacti
 					out["revertReason"] = decodeRevertReason(output)
 				}
 			case eventBadTransaction:
+				sawBadTransaction = true
 				code := badTransactionErrorCode(id, lg.Data)
 				out["success"] = false
 				out["executed"] = false
 				out["errorCode"] = errorCodeName(code)
 				out["revertReason"] = "BadTransactionSent: " + errorCodeName(code)
+			case eventRelayed:
+				sawRelayed = true
 			}
+		}
+
+		// Fallo silencioso en DEPLOY: la verificación pasó (Relayed) pero el CREATE interno revirtió
+		// en el constructor → no hay ContractDeployed/TransactionRelayed/BadTransactionSent y el RelayHub
+		// retornó OK. Sin esto se reportaría success:true, deployedAddress:null (el cliente no se entera).
+		if sawRelayed && !sawContractDeployed && !sawTransactionRelayed && !sawBadTransaction {
+			out["success"] = false
+			out["executed"] = false
+			out["revertReason"] = "deploy reverted: contract constructor failed (no code created)"
 		}
 	}
 

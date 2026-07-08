@@ -229,8 +229,43 @@ func TestGetTransactionReceiptRevertReason(t *testing.T) {
 
 	blockHash := result["result"].(map[string]interface{})
 
-	if blockHash["revertReason"] != "0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000096e616275636f646f730000000000000000000000000000000000000000000000" {
-		t.Errorf("Incorrect revert reason was gotten")
+	// El revertReason se devuelve DECODIFICADO a texto legible (Error(string)), no en hex crudo.
+	if blockHash["revertReason"] != "execution reverted: nabucodos" {
+		t.Errorf("Incorrect revert reason was gotten: %v", blockHash["revertReason"])
+	}
+}
+
+// TestGetTransactionReceiptFailedDeploy verifica la detección del fallo silencioso en DEPLOY:
+// el receipt trae el evento Relayed (verificación OK) pero NO ContractDeployed/TransactionRelayed/
+// BadTransactionSent (el CREATE interno revirtió en el constructor) → se expone como fallo.
+func TestGetTransactionReceiptFailedDeploy(t *testing.T) {
+	srv := serverMock()
+	defer srv.Close()
+
+	contents := []byte(`{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["0x504ce587a65bdbdb6414a0c6c16d86a04dd79bfcc4f2950eec9634b30ce5370f"],"id":53}`)
+
+	var rpcMessage rpc.JsonrpcMessage
+	_ = json.Unmarshal(contents, &rpcMessage)
+
+	var params []string
+	_ = json.Unmarshal(rpcMessage.Params, &params)
+
+	applicationConfig := model.ApplicationConfig{NodeURL: srv.URL + "/getReceiptFailedDeploy"}
+	config := model.Config{Application: applicationConfig}
+	relaySignerService := new(RelaySignerService)
+	_ = relaySignerService.Init(&config)
+	jsonResponse := relaySignerService.GetTransactionReceipt(rpcMessage.ID, params[0])
+
+	var result map[string]interface{}
+	json.Unmarshal([]byte(jsonResponse.String()), &result)
+
+	blockHash := result["result"].(map[string]interface{})
+
+	if blockHash["revertReason"] != "deploy reverted: contract constructor failed (no code created)" {
+		t.Errorf("Expected failed-deploy revertReason, got: %v", blockHash["revertReason"])
+	}
+	if blockHash["status"] != "0x0" {
+		t.Errorf("Expected status 0x0 for failed deploy, got: %v", blockHash["status"])
 	}
 }
 
@@ -352,6 +387,7 @@ func serverMock() *httptest.Server {
 	handler.HandleFunc("/getTransactionCount", mockGetNonce)
 	handler.HandleFunc("/getReceipt", mockGetReceipt)
 	handler.HandleFunc("/getReceiptRevertReason", mockGetReceiptRevertReason)
+	handler.HandleFunc("/getReceiptFailedDeploy", mockGetReceiptFailedDeploy)
 	handler.HandleFunc("/sendMetatransaction", mockSendMetatransaction)
 	handler.HandleFunc("/getRelayHubContract", mockGetRelayHubContract)
 
@@ -550,6 +586,39 @@ func mockGetReceiptRevertReason(w http.ResponseWriter, r *http.Request) {
 		  "transactionHash" : "0x41167872ab8e13bf7ea5ea366786da656b3f32181410523b97ffecf0ee9cd945",
 		  "transactionIndex" : "0x0",
 		  "revertReason" : "0x08c379a0000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000096e616275636f646f730000000000000000000000000000000000000000000000"	
+		}
+	  }`))
+}
+
+// mockGetReceiptFailedDeploy: receipt de un DEPLOY fallido — solo el evento Relayed
+// (0x79f72f9d...), SIN ContractDeployed/TransactionRelayed/BadTransactionSent. status externo 0x1.
+func mockGetReceiptFailedDeploy(w http.ResponseWriter, r *http.Request) {
+	_, _ = w.Write([]byte(`{
+		"jsonrpc" : "2.0",
+		"id" : 53,
+		"result" : {
+		  "blockHash" : "0x6e3aa24e261e61832624749b64049104c6105ba870d3375484548ffdb133eeea",
+		  "blockNumber" : "0xaae545",
+		  "contractAddress" : null,
+		  "cumulativeGasUsed" : "0x309f0",
+		  "from" : "0xd00e6624a73f88b39f82ab34e8bf2b4d226fd768",
+		  "gasUsed" : "0x309f0",
+		  "logs" : [ {
+			"address" : "0xff6d55d01fb12695ea00c071ad8af3ce44cf3a91",
+			"topics" : [ "0x79f72f9dacecfa9af3cfe946364971d0ef4826ffd35451658b283d58a382c20f", "0x000000000000000000000000a20aa371a9d05bba5d087bfee8fdf47ffe1088da", "0x000000000000000000000000d00e6624a73f88b39f82ab34e8bf2b4d226fd768" ],
+			"data" : "0x",
+			"blockNumber" : "0xaae545",
+			"transactionHash" : "0x41167872ab8e13bf7ea5ea366786da656b3f32181410523b97ffecf0ee9cd945",
+			"transactionIndex" : "0x0",
+			"blockHash" : "0x6e3aa24e261e61832624749b64049104c6105ba870d3375484548ffdb133eeea",
+			"logIndex" : "0x0",
+			"removed" : false
+		  } ],
+		  "logsBloom" : "0x0000000000400000000000000000000000000000080000000000000000000000000000000000000000020000010000000000000000000000400000000000000002000000000001000000008000000000100000000020010000100000000000000800000000000000000000000000000000000000000000000000000000000000000000000010000000000000080000000000000000000000000000010000000000004800040000000000000001800000001001400000000000000010000000000000000a000000004008000000000000000000000000000000000000000000000000020000000000000000000000100000000020000000200000000000000000",
+		  "status" : "0x1",
+		  "to" : "0xff6d55d01fb12695ea00c071ad8af3ce44cf3a91",
+		  "transactionHash" : "0x41167872ab8e13bf7ea5ea366786da656b3f32181410523b97ffecf0ee9cd945",
+		  "transactionIndex" : "0x0"
 		}
 	  }`))
 }
