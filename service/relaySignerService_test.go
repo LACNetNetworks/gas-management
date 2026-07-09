@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/LACNetNetworks/gas-relay-signer/model"
 	"github.com/LACNetNetworks/gas-relay-signer/rpc"
@@ -142,8 +143,8 @@ func TestGetTransactionCountPending(t *testing.T) {
 	config := model.Config{Application: applicationConfig}
 	relaySignerService := new(RelaySignerService)
 	_ = relaySignerService.Init(&config)
-	relaySignerService.senders = make(map[string]*big.Int)
-	relaySignerService.senders["0x92c9885663f6e84127c857d3137936c424b7e07555d2bc7d8bd781b3f0847ac8"] = new(big.Int).SetUint64(200)
+	relaySignerService.senders = make(map[string]*nonceEntry)
+	relaySignerService.senders["0x92c9885663f6e84127c857d3137936c424b7e07555d2bc7d8bd781b3f0847ac8"] = &nonceEntry{next: 200, updatedAt: time.Now()}
 	jsonResponse := relaySignerService.GetTransactionCount(rpcMessage.ID, params[0], true)
 
 	if jsonResponse.String() != `{"jsonrpc":"2.0","id":53,"result":"0xc8"}` {
@@ -170,7 +171,7 @@ func TestGetTransactionCountPendingNoValue(t *testing.T) {
 	relayHubAddress := common.HexToAddress("0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E")
 	relaySignerService.Config.Application.RelayHubContractAddress = &relayHubAddress
 	relaySignerService.Config.Application.ContractAddress = "0xdD37c69fF29C4b93A346Ed6dF184f48A71800b7E"
-	relaySignerService.senders = make(map[string]*big.Int)
+	relaySignerService.senders = make(map[string]*nonceEntry)
 	jsonResponse := relaySignerService.GetTransactionCount(rpcMessage.ID, params[0], true)
 
 	if jsonResponse.String() != `{"jsonrpc":"2.0","id":53,"result":"0x159"}` {
@@ -355,6 +356,9 @@ func TestNonceAfterTransactions(t *testing.T) {
 
 	sender := "0x92c9885663f6e84127c857d3137936c424b7e07555d2bc7d8bd781b3f0847ac8"
 
+	// Tras relayar una tx firmada con nonce=i, la lectura "pending" debe devolver el PRÓXIMO
+	// nonce a usar (i+1) — no el recién consumido (comportamiento antiguo, que provocaba colisión
+	// inmediata del siguiente envío).
 	for i := 34; i < 45; i++ {
 		jsonResponse := relaySignerService.SendMetatransaction(rpcMessage.ID, &to, gasLimit, encodedFunction, 27, r, s, sender, uint64(i))
 		if jsonResponse.String() != `{"jsonrpc":"2.0","id":2914410858336929,"result":"0x9c2fb4956ce18491021a534106fe50e7cfe86bcc373b1626623fa0366f4cc3bc"}` {
@@ -363,16 +367,10 @@ func TestNonceAfterTransactions(t *testing.T) {
 
 		jsonResponseNonce := relaySignerService.GetTransactionCount(rpcMessage.ID, sender, true)
 
-		fmt.Println(jsonResponseNonce)
-
-		nonce := fmt.Sprintf("%x", i)
-
-		fmt.Println(nonce)
-
-		responseNonce := fmt.Sprintf(`{"jsonrpc":"2.0","id":2914410858336929,"result":"0x%s"}`, nonce)
+		responseNonce := fmt.Sprintf(`{"jsonrpc":"2.0","id":2914410858336929,"result":"0x%x"}`, i+1)
 
 		if jsonResponseNonce.String() != responseNonce {
-			t.Errorf("Incorrect nonce was gotten")
+			t.Errorf("Incorrect nonce was gotten: %s, expected %s", jsonResponseNonce.String(), responseNonce)
 		}
 	}
 
@@ -380,6 +378,103 @@ func TestNonceAfterTransactions(t *testing.T) {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+// Dos envíos que firmaron el MISMO nonce (colisión concurrente) solo pueden consumir uno on-chain:
+// el caché debe quedar en nonce+1, no avanzar +1 por cada envío (eso lo dejaba por delante del real
+// para siempre → BadNonce permanente para esa address).
+func TestNonceCollisionDoesNotDoubleIncrement(t *testing.T) {
+	service := new(RelaySignerService)
+	service.Config = &model.Config{}
+	service.senders = make(map[string]*nonceEntry)
+
+	sender := "0xa0f03c489a1bcd53883289d3c476100220b21b0b"
+	service.incrementTransactionCount(sender, 23)
+	service.incrementTransactionCount(sender, 23) // colisión: mismo nonce firmado
+
+	next, ok := service.cachedNonce(sender)
+	if !ok || next != 24 {
+		t.Errorf("expected cached nonce 24 after collision, got %d (ok=%v)", next, ok)
+	}
+}
+
+// Al detectar BadTransactionSent la entrada del sender debe borrarse: la próxima lectura "pending"
+// vuelve al nonce real on-chain.
+func TestInvalidateNonce(t *testing.T) {
+	service := new(RelaySignerService)
+	service.Config = &model.Config{}
+	service.senders = make(map[string]*nonceEntry)
+
+	sender := "0xa0f03c489a1bcd53883289d3c476100220b21b0b"
+	service.incrementTransactionCount(sender, 10)
+	if _, ok := service.cachedNonce(sender); !ok {
+		t.Fatal("expected cache entry before invalidation")
+	}
+
+	// como llega desde el evento: address en checksum EIP-55
+	service.invalidateNonce(common.HexToAddress(sender).Hex())
+
+	if _, ok := service.cachedNonce(sender); ok {
+		t.Error("expected cache entry to be removed after invalidateNonce")
+	}
+}
+
+// Una entrada más vieja que el TTL debe descartarse (fallback on-chain) en lectura y no ancla el
+// incremento siguiente.
+func TestNonceCacheTTLExpiry(t *testing.T) {
+	service := new(RelaySignerService)
+	service.Config = &model.Config{}
+	service.Config.Application.NonceCacheTTL = 1 // 1s para el test
+	service.senders = make(map[string]*nonceEntry)
+
+	sender := "0xa0f03c489a1bcd53883289d3c476100220b21b0b"
+	service.senders[sender] = &nonceEntry{next: 99, updatedAt: time.Now().Add(-2 * time.Second)}
+
+	if _, ok := service.cachedNonce(sender); ok {
+		t.Error("expected expired entry to be discarded")
+	}
+
+	// tras expirar, el incremento re-siembra desde el nonce firmado (no desde la entrada vieja)
+	service.senders[sender] = &nonceEntry{next: 99, updatedAt: time.Now().Add(-2 * time.Second)}
+	service.incrementTransactionCount(sender, 5)
+	next, ok := service.cachedNonce(sender)
+	if !ok || next != 6 {
+		t.Errorf("expected cached nonce 6 after expired entry reseed, got %d (ok=%v)", next, ok)
+	}
+}
+
+// La misma address en lowercase (lecturas de ethers) y en checksum EIP-55 (escritura interna,
+// message.From().Hex()) debe caer en la MISMA entrada del caché.
+func TestNonceKeyCaseInsensitive(t *testing.T) {
+	service := new(RelaySignerService)
+	service.Config = &model.Config{}
+	service.senders = make(map[string]*nonceEntry)
+
+	checksum := "0xA0F03C489a1bcd53883289d3c476100220b21B0b"
+	lower := "0xa0f03c489a1bcd53883289d3c476100220b21b0b"
+
+	service.incrementTransactionCount(checksum, 7)
+	next, ok := service.cachedNonce(lower)
+	if !ok || next != 8 {
+		t.Errorf("expected cached nonce 8 via lowercase key, got %d (ok=%v)", next, ok)
+	}
+}
+
+// Accesos concurrentes al caché no deben corromperlo ni disparar el detector de carreras (-race).
+func TestNonceCacheConcurrentAccess(t *testing.T) {
+	service := new(RelaySignerService)
+	service.Config = &model.Config{}
+	service.senders = make(map[string]*nonceEntry)
+
+	sender := "0xa0f03c489a1bcd53883289d3c476100220b21b0b"
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(3)
+		go func(n uint64) { defer wg.Done(); service.incrementTransactionCount(sender, n) }(uint64(i))
+		go func() { defer wg.Done(); service.cachedNonce(sender) }()
+		go func() { defer wg.Done(); service.invalidateNonce(sender) }()
+	}
+	wg.Wait()
 }
 
 func serverMock() *httptest.Server {
