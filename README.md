@@ -79,6 +79,7 @@ Compilado en el tag `v1.1.0` reporta `v1.1.0`; en `develop` sin tag, algo como
 * [Comparison with Ethereum](https://github.com/LACNetNetworks/gas-management/blob/master/docs/COMPARISON_WITH_ETHEREUM.md)
 * [FAQ](https://github.com/LACNet-Networks/gas-management/blob/master/docs/FAQ.md)
 * [Reporte del fallo de la llamada interna (status=1 → fallida)](docs/RECEIPT-FALLO-INTERNO.md) — cómo el RelaySigner reescribe el receipt a `status=0`+`revertReason` y expone `relay_getMetaTxResult` (rama `develop`).
+* [Manejo del nonce (caché por sender y anti-bloqueo)](docs/NONCE-CACHE.md) — caché en memoria del próximo nonce por sender, y los 4 mecanismos que evitan que una address quede atascada tras una colisión `BadNonce` (rama `develop`).
 
 ## Copyright 2022 LACNet
 
