@@ -1,13 +1,37 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+context: |
+  Proyecto: `gas-relay-signer` (LACChain gas model) en Go 1.x, con `go-ethereum v1.9.15`.
+  Paquetes: `main.go` (rutas), `controller/` (relayController, processController),
+  `service/relaySignerService.go` (nucleo), `blockchain/` (cliente RPC), `relayhub/`,
+  `rpc/` (JSON-RPC), `model/Config.go` + `config.toml`, `audit/` (log a archivo), `errors/`.
+  Hoy expone una sola ruta HTTP: `POST /` catch-all JSON-RPC, en el puerto `9001`.
+
+  OBJETIVO PRINCIPAL DEL REPO: paridad funcional con el relayer en Node que vive en
+  `/Users/edumar111/lnet/workspace/lnet-repos/node_relayer` — traer al RelaySigner en Go las
+  funcionalidades que hoy solo existen alli. Toda propuesta de cambio en esta linea debe
+  encuadrarse como el cierre de una brecha concreta contra ese repo.
+
+  Fuentes de verdad de las brechas, a leer antes de proponer:
+  - `node_relayer/COMPARACION-GO-NODE.md` — nonces, concurrencia, cupo de gas.
+  - `node_relayer/ENDPOINTS-GO-VS-NODE.md` — superficie HTTP/RPC campo a campo.
+  - `node_relayer/DASHBOARD.md` — contrato de eventos SSE y corrida de referencia.
+  - `docs/PLAN-reorden-dashboard.md` — plan por fases de una parte del portado.
+
+  Brechas conocidas (Node las tiene, Go no): reordenamiento de nonces con tracker autoritativo de
+  lo en vuelo; endpoints `/info`, `/nonce/{address}`, `/relay`; dashboard SSE; log estructurado
+  JSON con `reqId`; passthrough RPC completo, batches y `eth_subscribe`; CORS; pre-chequeo por
+  simulacion `eth_call`; validacion del sufijo del gas model (`nodeAddress`, `expiration`) y
+  `AccountRules` via `AccountIngress`; cliente RPC compartido; lock global acotado al envio.
+
+  Lo que Go tiene y Node no, y NO se debe perder al portar: contabilidad del cupo de gas por
+  bloque (`ProcessNewBlocks` + `VerifyGasLimit`), `relay_getMetaTxResult`, y las transacciones
+  privadas `priv_*`/`eea_*`.
+
+  Convenciones: compatibilidad primero — el contrato JSON-RPC actual de `POST /` no cambia, y
+  todo lo nuevo va detras de flags en `config.toml` apagados por defecto. Cada cambio deja el
+  binario compilando y `go test ./...` en verde. La documentacion del proyecto se escribe en
+  espanol.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.
